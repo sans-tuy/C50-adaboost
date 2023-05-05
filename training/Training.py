@@ -1,5 +1,6 @@
 import math
 import imp
+import warnings
 import uuid
 import json
 import numpy as np
@@ -14,8 +15,8 @@ import gc
 import sys
 import tqdm
 
-from chefboost.training import Preprocess
-from chefboost.commons import functions, evaluate
+from training import Preprocess
+from commons import functions, evaluate
 
 #----------------------------------------
 
@@ -39,7 +40,7 @@ class MyPool(multiprocessing.pool.Pool):
 		super(MyPool, self).__init__(*args, **kwargs)
 
 #----------------------------------------
-def calculateEntropy(df, config):
+def calculateEntropy(df, config, weight_col=None, sample_weights=None):
 
 	algorithm = config['algorithm']
 
@@ -56,20 +57,54 @@ def calculateEntropy(df, config):
 	decisions = df['Decision'].value_counts().keys().tolist()
 
 	entropy = 0
+	if weight_col is None:
+		weight_col = 'weight'
+	
+	if weight_col not in df.columns:
+		df[weight_col] = 1
 
-	for i in range(0, len(decisions)):
-		decision = decisions[i]
-		num_of_decisions = df['Decision'].value_counts().tolist()[i]
-		#print(decision,"->",num_of_decisions)
+	if sample_weights is None:
+		sample_weights = np.array(df[weight_col])
+	else:
+		sample_weights = np.array(sample_weights)
 
-		class_probability = num_of_decisions/instances
+	# mengabaikan perhitungan bobot untuk iterasi pertama karena semua bobot bernilai sama 
+	if(df['weight'].iloc[0] == 0.0019230769230769232):
+		for i in range(0, len(decisions)):
+			decision = decisions[i]
+			num_of_decisions = df['Decision'].value_counts().tolist()[i]
+			# print(decision,"->",num_of_decisions)
 
-		entropy = entropy - class_probability*math.log(class_probability, 2)
+			class_probability = num_of_decisions/instances
+
+			entropy = entropy - class_probability*math.log(class_probability, 2)
+	else:
+		for i in range(0, len(decisions)):
+			decision = decisions[i]
+			num_of_decisions = df['Decision'].value_counts().tolist()[i]
+
+			class_probability = num_of_decisions/instances
+
+			if weight_col in df.columns:
+				sample_weights_mask = df[weight_col].values == sample_weights
+				sample_weights_masked = sample_weights[sample_weights_mask]
+				sample_weights_masked /= sample_weights_masked.sum()
+				class_probability = np.sum(sample_weights_masked)
+			
+			entropy = entropy - class_probability*math.log(class_probability, 2)
+		# total_weight = df[weight_col].sum()
+		# for i in range(0, len(decisions)):
+		# 	decision = decisions[i]
+		# 	subdataset = df[df['Decision'] == decision]
+		# 	class_weight = subdataset[weight_col].sum()
+		# 	class_probability = class_weight / total_weight
+
+		# 	entropy = entropy - class_weight * math.log(class_weight, 2)
 
 	return entropy
 
 def findDecision(df, config):
-	#information gain for id3, gain ratio for c4.5, gini for cart, chi square for chaid and std for regression
+	#information gain for id3, gain ratio for c4.5, and std for regression
 	algorithm = config['algorithm']
 
 	resp_obj = findGains(df, config)
@@ -84,14 +119,6 @@ def findDecision(df, config):
 		winner_index = gains.index(max(gains))
 		metric_value = entropy
 		metric_name = "Entropy"
-	elif algorithm == "CART":
-		winner_index = gains.index(min(gains))
-		metric_value = min(gains)
-		metric_name = "Gini"
-	elif algorithm == "CHAID":
-		winner_index = gains.index(max(gains))
-		metric_value = max(gains)
-		metric_name = "ChiSquared"
 	elif algorithm == "Regression":
 		winner_index = gains.index(max(gains))
 		metric_value = max(gains)
@@ -109,15 +136,17 @@ def findGains(df, config):
 	#-----------------------------
 
 	entropy = 0
+	total_weight = df['weight'].sum()
 
 	if algorithm == "ID3" or algorithm == "C4.5":
-		entropy = calculateEntropy(df, config)
+		entropy = calculateEntropy(df, config, weight_col='weight')
+		# print(entropy, 'entropy total')
 
-	columns = df.shape[1]; instances = df.shape[0]
+	columns = df.shape[1]; instances =  df.shape[0]
 
 	gains = []
 
-	for i in range(0, columns-1):
+	for i in range(0, columns-2):
 		column_name = df.columns[i]
 		column_type = df[column_name].dtypes
 
@@ -125,8 +154,10 @@ def findGains(df, config):
 
 		if column_type != 'object':
 			df = Preprocess.processContinuousFeatures(algorithm, df, column_name, entropy, config)
+			# print(df)
 
 		classes = df[column_name].value_counts()
+		# print(classes, 'clases')
 
 		splitinfo = 0
 		if algorithm == 'ID3' or algorithm == 'C4.5':
@@ -136,59 +167,47 @@ def findGains(df, config):
 
 		for j in range(0, len(classes)):
 			current_class = classes.keys().tolist()[j]
-			#print(column_name,"->",current_class)
+			# print(column_name,"->",j, "->",current_class)
 
 			subdataset = df[df[column_name] == current_class]
-			#print(subdataset)
+			# print(subdataset)
 
 			subset_instances = subdataset.shape[0]
+			# print(subset_instances)
 			class_probability = subset_instances/instances
 
 			if algorithm == 'ID3' or algorithm == 'C4.5':
-				subset_entropy = calculateEntropy(subdataset, config)
+				subset_entropy = calculateEntropy(subdataset, config, weight_col='weight')
+				# print(subset_entropy, 'entropy subset')
 				gain = gain - class_probability * subset_entropy
 
 			if algorithm == 'C4.5':
 				splitinfo = splitinfo - class_probability*math.log(class_probability, 2)
 
-			elif algorithm == 'CART': #GINI index
-				decision_list = subdataset['Decision'].value_counts().tolist()
-
-				subgini = 1
-
-				for k in range(0, len(decision_list)):
-					subgini = subgini - math.pow((decision_list[k]/subset_instances), 2)
-
-				gain = gain + (subset_instances / instances) * subgini
-
-			elif algorithm == 'CHAID':
-				num_of_decisions = len(decision_classes)
-
-				expected = subset_instances / num_of_decisions
-
-				for d in decision_classes:
-					num_of_d = subdataset[subdataset["Decision"] == d].shape[0]
-
-					chi_square_of_d = math.sqrt(((num_of_d - expected) * (num_of_d - expected)) / expected)
-
-					gain += chi_square_of_d
-
-			elif algorithm == 'Regression':
-				subset_stdev = subdataset['Decision'].std(ddof=0)
-				gain = gain + (subset_instances/instances)*subset_stdev
-
 		#iterating over classes for loop end
 		#-------------------------------
-
-		if algorithm == 'Regression':
-			stdev = df['Decision'].std(ddof=0)
-			gain = stdev - gain
 		if algorithm == 'C4.5':
 			if splitinfo == 0:
 				splitinfo = 100 #this can be if data set consists of 2 rows and current column consists of 1 class. still decision can be made (decisions for these 2 rows same). set splitinfo to very large value to make gain ratio very small. in this way, we won't find this column as the most dominant one.
+			# gain ratio
 			gain = gain / splitinfo
 
 		#----------------------------------
+		if config['boosting'] == 'adaboost' and df['weight'].iloc[0] != 0.0019230769230769232:
+			weighted_errors = []
+			for threshold in df[column_name].unique():
+				feature_weighted_error = 0
+				for decision_class in decision_classes:
+					feature_subset = df[df[column_name] == threshold]
+					incorrect_subset = feature_subset[feature_subset['Decision'] != decision_class]
+					weight_incorrect = incorrect_subset['weight'].sum()
+					feature_weighted_error += weight_incorrect
+
+				feature_weighted_error = feature_weighted_error / total_weight
+				weighted_errors.append((threshold, feature_weighted_error))
+
+			best_threshold, best_weighted_error = min(weighted_errors, key=lambda x: x[1])
+			gain = best_weighted_error
 
 		gains.append(gain)
 
@@ -197,8 +216,7 @@ def findGains(df, config):
 	resp_obj = {}
 	resp_obj["gains"] = {}
 
-	for idx, feature in enumerate(df.columns[0:-1]): #Decision is always the last column
-		#print(idx, feature)
+	for idx, feature in enumerate(df.columns[0:-2]): #Decision and weight is always the two last column
 		resp_obj["gains"][feature] = gains[idx]
 
 	resp_obj["entropy"] = entropy
@@ -213,8 +231,6 @@ def createBranch(config, current_class, subdataset, numericColumn, branch_index,
 	custom_rules = []
 
 	algorithm = config['algorithm']
-	enableAdaboost = config['enableAdaboost']
-	enableGBM = config['enableGBM']
 	max_depth = config['max_depth']
 	enableParallelism = config['enableParallelism']
 
@@ -239,15 +255,7 @@ def createBranch(config, current_class, subdataset, numericColumn, branch_index,
 	#-----------------------------------------------
 	#can decision be made?
 
-	if enableGBM == True and root >= max_depth: #max depth
-		final_decision = subdataset['Decision'].mean()
-		terminateBuilding = True
-	elif enableAdaboost == True:
-		#final_decision = subdataset['Decision'].value_counts().idxmax()
-		final_decision = functions.sign(subdataset['Decision'].mean()) #get average
-		terminateBuilding = True
-		enableParallelism = False
-	elif len(subdataset['Decision'].value_counts().tolist()) == 1:
+	if len(subdataset['Decision'].value_counts().tolist()) == 1:
 		final_decision = subdataset['Decision'].value_counts().keys().tolist()[0] #all items are equal in this case
 		terminateBuilding = True
 	elif subdataset.shape[1] == 1: #if decision cannot be made even though all columns dropped
@@ -257,7 +265,7 @@ def createBranch(config, current_class, subdataset, numericColumn, branch_index,
 	#elif algorithm == 'Regression' and subdataset['Decision'].std(ddof=0)/global_stdev < 0.4: #pruning condition
 		final_decision = subdataset['Decision'].mean() #get average
 		terminateBuilding = True
-	elif algorithm in ['ID3', 'C4.5', 'CART', 'CHAID'] and root >= max_depth:
+	elif algorithm in ['ID3', 'C4.5'] and root >= max_depth:
 		final_decision = subdataset['Decision'].value_counts().idxmax() #get the most frequent one
 		terminateBuilding = True
 
@@ -345,25 +353,16 @@ def createBranch(config, current_class, subdataset, numericColumn, branch_index,
 def buildDecisionTree(df, root, file, config, dataset_features, parent_level = 0, leaf_id = 0, parents = 'root', tree_id = 0, validation_df = None, main_process_id = None):
 
 	models = []
+	# Ignore the DeprecationWarning message for the imp module
+	warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 	decision_rules = []
 
-	feature_names = df.columns[0:-1]
+	feature_names = df.columns[0:-2]
 
 	enableParallelism = config['enableParallelism']
-	algorithm = config['algorithm']
 
 	json_file = file.split(".")[0]+".json"
-
-	random_forest_enabled = config['enableRandomForest']
-	enableGBM = config['enableGBM']
-	enableAdaboost = config['enableAdaboost']
-
-	if root == 1:
-		if random_forest_enabled != True and enableGBM != True and enableAdaboost != True:
-			raw_df = df.copy()
-
-	#--------------------------------------
 
 	df_copy = df.copy()
 
@@ -382,7 +381,7 @@ def buildDecisionTree(df, root, file, config, dataset_features, parent_level = 0
 
 	#restoration
 	columns = df.shape[1]
-	for i in range(0, columns-1):
+	for i in range(0, columns-2):
 		#column_name = df.columns[i]; column_type = df[column_name].dtypes #numeric field already transformed to object. you cannot check it with df itself, you should check df_copy
 		column_name = df_copy.columns[i]; column_type = df_copy[column_name].dtypes
 		if column_type != 'object' and column_name != winner_name:
@@ -581,18 +580,19 @@ def buildDecisionTree(df, root, file, config, dataset_features, parent_level = 0
 			#-----------------------------------
 
 		#is regular decision tree
-		if config['enableRandomForest'] != True and config['enableGBM'] != True and config['enableAdaboost'] != True:
 		#this is reguler decision tree. find accuracy here.
 
-			moduleName = "outputs/rules/rules"
-			fp, pathname, description = imp.find_module(moduleName)
-			myrules = imp.load_module(moduleName, fp, pathname, description) #rules0
-			models.append(myrules)
+		# moduleName = "outputs/rules/rules"
+		# fp, pathname, description = imp.find_module(moduleName)
+		# myrules = imp.load_module(moduleName, fp, pathname, description) #rules0
+		
+		# models.append(myrules)
 
 	return models
 
 def findPrediction(row):
 	params = []
+	warnings.filterwarnings("ignore", category=DeprecationWarning)
 	num_of_features = row.shape[0] - 1
 	for j in range(0, num_of_features):
 		params.append(row[j])

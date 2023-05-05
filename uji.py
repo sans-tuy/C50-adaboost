@@ -3,26 +3,21 @@ import pandas as pd
 import Chefboost as chef
 
 df = pd.read_csv("liver dataset convert.csv")
-# print(df)
-
-# df['liver'] = df['liver'].map({2:-1,1:1})
-# print(df)
-
-# df['decision'] = df['decision'].map({2:'normal',1:'liver'})
 print(df)
 
-# config =  {'enableAdaboost': True, 'num_of_weak_classifier': 10, 'enableParallelism': False}
-config =  {'algorithm': 'C4.5', 'enableParallelism': False}
+config =  {'algorithm': 'C4.5', 'enableParallelism': False, 'boosting': 'adaboost'}
 model = chef.fit(df.copy(), config=config, target_label = 'decision')
 
+# config =  {'enableAdaboost': True, 'num_of_weak_classifier': 10, 'enableParallelism': False}
+# dfTest = pd.read_csv("liver dataset convert test.csv")
+
 # print("result actual" + " - " + "result prediction")
-# # print('ini model', model)
-# for index, instance in df.iterrows():
+# for index, instance in dfTest.iterrows():
 #     prediction = chef.predict(model, instance)
-#     actual = instance['liver']
-#     if actual == float(prediction):
+#     actual = instance['decision']
+#     if actual == prediction:
 #         classified = True
 #     else :
 #         classified = False
 #         print("*", end=" ")
-#     print(str(actual) + " - " + str(prediction))
+#     print(actual + " - " + prediction)

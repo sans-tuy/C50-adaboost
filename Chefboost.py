@@ -2,17 +2,36 @@ import pandas as pd
 import math
 import numpy as np
 import time
-import imp
+import warnings
 import pickle
 import os
 from os import path
 import json
 
-from chefboost.commons import functions, evaluate as eval
-from chefboost.training import Preprocess, Training
-from chefboost.tuning import gbm, adaboost, randomforest
+from commons import functions, evaluate as eval
+from training import Training
+from tuning import gbm, adaboost, randomforest
+
+from tqdm import tqdm
+import imp
 
 #------------------------
+
+def findPrediction(row):
+	epoch = row['Epoch']
+	row = row.drop(labels=['Epoch'])
+	columns = row.shape[0]
+	
+	params = []
+	for j in range(0, columns-1):
+		params.append(row[j])
+		
+	moduleName = "outputs/rules/rules_%d" % (epoch)
+	fp, pathname, description = imp.find_module(moduleName)
+	myrules = imp.load_module(moduleName, fp, pathname, description)
+	prediction = myrules.findDecision(params)
+	
+	return prediction
 
 def fit(df, config = {}, target_label = 'Decision', validation_df = None):
 
@@ -172,23 +191,98 @@ def fit(df, config = {}, target_label = 'Decision', validation_df = None):
 
 	begin = time.time()
 
-	trees = []; alphas = []
+	trees = []; alphas = []; models = []
+	num_of_weak_classifier=50
+	best_epoch_idx = 0; best_epoch_value = 1000000
+	initializeAlphaFile()
 
-	if enableAdaboost == True:
-		trees, alphas = adaboost.apply(df, config, header, dataset_features, validation_df = validation_df, process_id = process_id)
+	# root = 1; file = "outputs/rules/rules.py"
+	# functions.createFile(file, header)
+	
+	#for i in range(0, num_of_weak_classifier):
+	pbar = tqdm(range(0, num_of_weak_classifier), desc='Adaboosting')
+	worksheet = df.copy()
+	rows = df.shape[0]
+	worksheet.insert(loc=len(worksheet.columns)-1, column='weight', value=1/rows)
 
-	else: #regular decision tree building
-
-		root = 1; file = "outputs/rules/rules.py"
+	for i in pbar:
+		root = 1
+		file = "outputs/rules/rules_"+str(i)+".py"
+		
 		functions.createFile(file, header)
-
-		if enableParallelism == True:
-			json_file = "outputs/rules/rules.json"
-			functions.createFile(json_file, "[\n")
-
-		trees = Training.buildDecisionTree(df, root = root, file = file, config = config
+		
+		Training.buildDecisionTree(worksheet, root = root, file = file, config = config
 				, dataset_features = dataset_features
 				, parent_level = 0, leaf_id = 0, parents = 'root', validation_df = validation_df, main_process_id = process_id)
+		
+		#---------------------------------------
+		
+		moduleName = "outputs/rules/rules_"+str(i)
+		fp, pathname, description = imp.find_module(moduleName)
+		myrules = imp.load_module(moduleName, fp, pathname, description)
+		models.append(myrules)
+		
+		#---------------------------------------
+		
+		df['Epoch'] = i
+		worksheet['Prediction'] = df.apply(findPrediction, axis=1)
+		df = df.drop(columns = ['Epoch'])
+		#---------------------------------------
+		prediksi = worksheet['Prediction']
+		worksheet['Prediction'] = prediksi.map({'liver': 1, 'normal': 0})
+		aktual = df['Decision']
+		worksheet['Actual'] = aktual.map({'liver': 1, 'normal': 0})
+		worksheet['Loss'] = abs(worksheet['Actual'] - worksheet['Prediction'])/2
+		worksheet['Weight_Times_Loss'] = worksheet['Loss'] * worksheet['weight']
+
+		# epsilon = worksheet['Weight_Times_Loss'].sum()
+		# print((worksheet['Actual'] != worksheet['Prediction']).astype(int).sum() / len(prediksi), 'new cal' )
+
+		# epsilon = (worksheet['Actual'] != worksheet['Prediction']).astype(int).sum() / len(prediksi)
+		epsilon = ((worksheet['Actual'] != worksheet['Prediction']).astype(int)*worksheet['weight']).sum()
+		alpha = (math.log((1 - epsilon)/epsilon))/2 #use alpha to update weights in the next round
+		alphas.append(alpha)
+
+		#store alpha
+		addEpochAlpha(i, alpha)
+
+		# update weight
+		worksheet['Alpha'] = alpha
+		worksheet['New_Weights'] = worksheet['weight'] * (-alpha * (worksheet['Actual'] != worksheet['Prediction']).apply(lambda x: -1 if x else 1)).apply(math.exp)
+
+		#normalize
+		worksheet['New_Weights'] = worksheet['New_Weights'] / worksheet['New_Weights'].sum()
+		worksheet['weight'] = worksheet['New_Weights']
+		# print(worksheet['weight'])
+		# print(worksheet['Alpha'])
+		worksheet = worksheet.drop(columns = ['New_Weights', 'Prediction', 'Actual', 'Loss', 'Weight_Times_Loss', 'Alpha'])
+		if(i>0):
+			obj = {
+				"trees": models[0: i],
+				"alphas": alphas,
+				"config": config,
+				"nan_values": nan_values
+			}
+			temp_df = base_df.copy()
+			evaluate(obj, temp_df, task = 'train')
+	trees = models[0: num_of_weak_classifier]
+
+	# if enableAdaboost == True:
+	# 	trees, alphas = adaboost.apply(df, config, header, dataset_features, validation_df = validation_df, process_id = process_id)
+
+	# else: #regular decision tree building
+
+	# 	root = 1; file = "outputs/rules/rules.py"
+	# 	functions.createFile(file, header)
+
+	# 	if enableParallelism == True:
+	# 		json_file = "outputs/rules/rules.json"
+	# 		functions.createFile(json_file, "[\n")
+
+	# 	trees = Training.buildDecisionTree(worksheet, root = root, file = file, config = config
+	# 			, dataset_features = dataset_features
+	# 			, parent_level = 0, leaf_id = 0, parents = 'root', validation_df = validation_df, main_process_id = process_id)
+	# 	print('export model belum tepat untuk c4.5 setelah diboosting')
 
 	print("-------------------------")
 	print("finished in ",time.time() - begin," seconds")
@@ -206,7 +300,6 @@ def fit(df, config = {}, target_label = 'Decision', validation_df = None):
 	df = base_df.copy()
 	# df['Decision'] = df['Decision'].astype(str)
 	evaluate(obj, df, task = 'train')
-
 	#validation set accuracy
 	if isinstance(validation_df, pd.DataFrame):
 		evaluate(obj, validation_df, task = 'validation')
@@ -216,6 +309,17 @@ def fit(df, config = {}, target_label = 'Decision', validation_df = None):
 	return obj
 
 	#-----------------------------------------
+
+def initializeAlphaFile():
+	file = "outputs/rules/alphas.py"
+	header = "def findAlpha(epoch):\n"
+	functions.createFile(file, header)
+
+def addEpochAlpha(epoch, alpha):
+	file = "outputs/rules/alphas.py"
+	content = "   if epoch == "+str(epoch)+":\n"
+	content += "      return "+str(alpha)
+	functions.storeRule(file, content)
 
 def predict(model, param):
 
@@ -298,6 +402,8 @@ def predict(model, param):
 					else:
 						classification = True
 						prediction_classes.append(custom_prediction)
+						# print('masuk sini', prediction_classes)
+						# print('epoch', index)
 			else: #adaboost
 				prediction += alphas[index] * tree.findDecision(param)
 			index = index + 1
@@ -323,6 +429,8 @@ def predict(model, param):
 			predictions = np.array(prediction_classes)
 
 			#find the most frequent prediction
+			# print(predictions)
+			# idx = np.argmax(alphas)
 			(values, counts) = np.unique(predictions, return_counts=True)
 			idx = np.argmax(counts)
 			prediction = values[idx]
@@ -413,7 +521,6 @@ def feature_importance(rules):
 	dfs = []
 
 	for rule in rules:
-		print("Decision rule: ",rule)
 
 		file = open(rule, 'r')
 		lines = file.readlines()
@@ -517,7 +624,6 @@ def evaluate(model, df, target_label = 'Decision', task = 'test'):
 	#if target is not the last column
 	if df.columns[-1] != 'Decision':
 		new_column_order = df.columns.drop('Decision').tolist() + ['Decision']
-		print(new_column_order)
 		df = df[new_column_order]
 
 	#--------------------------

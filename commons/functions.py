@@ -1,10 +1,11 @@
 import numpy as np
 import pathlib
 import imp
+import warnings
 import os
 from os import path
 import multiprocessing
-from chefboost import Chefboost as cb
+import Chefboost as cb
 
 def bulk_prediction(df, model):
 
@@ -17,6 +18,7 @@ def bulk_prediction(df, model):
 	df['Prediction'] = predictions
 
 def restoreTree(moduleName):
+   warnings.filterwarnings("ignore", category=DeprecationWarning)
    fp, pathname, description = imp.find_module(moduleName)
    return imp.load_module(moduleName, fp, pathname, description)
 
@@ -80,7 +82,7 @@ def initializeFolders():
 def initializeParams(config):
 	algorithm = 'ID3'
 	enableRandomForest = False; num_of_trees = 5; enableMultitasking = False
-	enableGBM = False; epochs = 10; learning_rate = 1; max_depth = 5
+	enableGBM = False; epochs = 10; learning_rate = 1; max_depth = 8
 	enableAdaboost = False; num_of_weak_classifier = 4
 	enableParallelism = True
 	num_cores = int(multiprocessing.cpu_count()/2) #allocate half of your total cores
